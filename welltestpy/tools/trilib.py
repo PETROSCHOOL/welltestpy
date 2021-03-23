@@ -8,19 +8,14 @@ The following functions are provided
 
 .. autosummary::
    triangulate
+   sym
 """
 # pylint: disable=C0103
-from __future__ import absolute_import, division, print_function
-
 from copy import deepcopy as dcopy
 import numpy as np
 
-import matplotlib.pyplot as plt
 
-# use the ggplot style like R
-plt.style.use("ggplot")
-
-__all__ = ["triangulate"]
+__all__ = ["triangulate", "sym"]
 
 
 def triangulate(distances, prec, all_pos=False):
@@ -37,7 +32,8 @@ def triangulate(distances, prec, all_pos=False):
     distances : :class:`numpy.ndarray`
         Given distances among the point to be triangulated.
         It hat to be a symmetric matrix with a vanishing diagonal and
-        ``distances[i,j] = |pi-pj|``
+
+            ``distances[i,j] = |pi-pj|``
 
         If a distance is unknown, you can set it to ``-1``.
     prec : :class:`float`
@@ -131,7 +127,7 @@ def _triangulatesgl(distances, sp1, sp2, prec):
 
 def _addpoints(sol, distances, prec):
     """
-    Tries for each point to add it to a given solution-approach.
+    Try for each point to add it to a given solution-approach.
 
     gives all possibilties and a status about the solution:
         state = 0: possibilities found
@@ -170,7 +166,7 @@ def _addpoints(sol, distances, prec):
 
 def _addpoint(sol, i, distances, prec):
     """
-    Tries to add point i to a given solution-approach.
+    Try to add point i to a given solution-approach.
 
     gives all possibilties and a status about the solution:
         state = 0: possibilities found
@@ -320,7 +316,7 @@ def _distvalid(dis, err=0.0, verbose=True):
 
 def _xvalue(a, b, c):
     """
-    Defines the x-value for the upper point of a triangle.
+    Get the x-value for the upper point of a triangle.
 
     where c is the length of the down side starting in the origin and
     lying on the x-axes, a is the distance of the unknown point to the origen
@@ -331,7 +327,7 @@ def _xvalue(a, b, c):
 
 def _yvalue(b, a, c):
     """
-    Defines the two possible y-values for the upper point of a triangle.
+    Get the two possible y-values for the upper point of a triangle.
 
     where c is the length of the down side starting in the origin and
     lying on the x-axes, a is the distance of the unknown point to the origen
@@ -368,7 +364,7 @@ def _rotate(res):
 
 def _tranmat(a, b):
     """
-    Defines the coefficents for the affine-linear function f(x)=Ax+s.
+    Get the coefficents for the affine-linear function f(x)=Ax+s.
 
     Which fullfills that A is a rotation-matrix,
     f(a) = [0,0] and f(b) = [|b-a|,0].
@@ -385,7 +381,7 @@ def _tranmat(a, b):
 
 def _invtranmat(A, s):
     """
-    Defines the coefficents for the affine-linear function g(x)=Bx+t.
+    Get the coefficents for the affine-linear function g(x)=Bx+t.
 
     which is inverse to f(x)=Ax+s
     """
@@ -395,7 +391,7 @@ def _invtranmat(A, s):
 
 
 def _affinef(A, s):
-    """Gives an affine-linear function f(x) = Ax+s."""
+    """Get an affine-linear function f(x) = Ax+s."""
 
     def func(x):
         """Affine-linear function func(x) = Ax+s."""
@@ -406,7 +402,7 @@ def _affinef(A, s):
 
 def _affinef_pnt(a1, a2, b1, b2, prec=0.01):
     """
-    Gives an affine-linear function that maps f(ai) = bi.
+    Get an affine-linear function that maps f(ai) = bi.
 
     if |a2-a1| == |b2-b1| with respect to the given precision
     """
@@ -424,65 +420,10 @@ def _affinef_pnt(a1, a2, b1, b2, prec=0.01):
 
 
 def _dist(v, w):
-    """Gives the distance between two given point vectors v and w."""
+    """Get the distance between two given point vectors v and w."""
     return np.linalg.norm(np.array(v) - np.array(w))
 
 
-def _sym(A):
-    """Gives the symmetrized version of a lower or upper triangle-matrix A."""
+def sym(A):
+    """Get the symmetrized version of a lower or upper triangle-matrix A."""
     return A + A.T - np.diag(A.diagonal())
-
-
-def _plotres(res, names=None, filename=None):
-    """Plots all solutions in res and labels the points with names."""
-    # calculate Column- and Row-count for quadratic shape of the plot
-    # total number of plots
-    Tot = len(res)
-    # columns near the square-root but tendentially wider than tall
-    Cols = int(np.ceil(np.sqrt(Tot)))
-    # enough rows to catch all plots
-    Rows = int(np.ceil(Tot / Cols))
-    # Possition numbers as array
-    Pos = np.arange(1, Tot + 1)
-
-    # generate names for points if undefined
-    if names is None:
-        names = []
-        for i in range(len(res[0])):
-            names.append("p" + str(i))
-
-    # genearte commen borders for all plots
-    xmax = 0.0
-    xmin = 0.0
-    ymax = 0.0
-    ymin = 0.0
-
-    for i in res:
-        for j in i:
-            xmax = max(j[0], xmax)
-            xmin = min(j[0], xmin)
-            ymax = max(j[1], ymax)
-            ymin = min(j[1], ymin)
-
-    # add some space around the points in the plot
-    space = 0.2 * max(abs(xmax - xmin), abs(ymax - ymin))
-
-    fig = plt.figure(dpi=75, figsize=[3 * Cols, 3 * Rows])
-    fig.suptitle("Possible Well-constellations", fontsize=18)
-
-    for i, result in enumerate(res):
-        ax = fig.add_subplot(Rows, Cols, Pos[i])  # , sharex=True, sharey=True)
-        ax.set_title("Result nr.: {}".format(i))
-        ax.set_xlim([xmin - space, xmax + space])
-        ax.set_ylim([ymin - space, ymax + space])
-        ax.set_aspect("equal")
-        for j, name in enumerate(names):
-            ax.scatter(result[j][0], result[j][1], color="C1")
-            ax.annotate(" " + name, (result[j][0], result[j][1]))
-
-    fig.tight_layout(rect=[0, 0.03, 1, 0.95])
-
-    if filename is not None:
-        plt.savefig(filename, format="pdf")
-
-    plt.show()

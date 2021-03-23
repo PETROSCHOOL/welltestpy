@@ -1,20 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-welltestpy subpackage providing classes for parameter estimation.
+welltestpy subpackage providing base classe for transient estimations.
 
-.. currentmodule:: welltestpy.estimate.estimatelib
+.. currentmodule:: welltestpy.estimate.transient_lib
 
 The following classes are provided
 
 .. autosummary::
    TransientPumping
-   ExtTheis3D
-   ExtTheis2D
-   Neuman2004
-   Theis
 """
-from __future__ import absolute_import, division, print_function
-
 from copy import deepcopy as dcopy
 import os
 import time as timemodule
@@ -23,42 +17,17 @@ import numpy as np
 import spotpy
 import anaflow as ana
 
-from welltestpy.process.processlib import normpumptest, filterdrawdown
-from welltestpy.estimate.spotpy_classes import TypeCurve
-from welltestpy.tools.plotter import (
-    plotfit_transient,
-    plotparainteract,
-    plotparatrace,
-    plotsensitivity,
-)
+from ..data import testslib
+from ..process import processlib
+from . import spotpylib
+from ..tools import plotter
 
 __all__ = [
     "TransientPumping",
-    "ExtTheis3D",
-    "ExtTheis2D",
-    "Neuman2004",
-    "Theis",
 ]
 
 
-def fast_rep(para_no, infer_fac=4, freq_step=2):
-    """Number of iterations needed for the FAST algorithm.
-
-    Parameters
-    ----------
-    para_no : :class:`int`
-        Number of parameters in the model.
-    infer_fac : :class:`int`, optional
-        The inference fractor. Default: 4
-    freq_step : :class:`int`, optional
-        The frequency step. Default: 2
-    """
-    return 2 * int(
-        para_no * (1 + 4 * infer_fac ** 2 * (1 + (para_no - 2) * freq_step))
-    )
-
-
-class TransientPumping(object):
+class TransientPumping:
     """Class to estimate transient Type-Curve parameters.
 
     Parameters
@@ -161,31 +130,50 @@ class TransientPumping(object):
         self.radnames = None
         """:class:`numpy.ndarray`: names of the radii well combination"""
 
-        self.para = None
-        """:class:`list` of :class:`float`: estimated parameters"""
+        self.estimated_para = {}
+        """:class:`dict`: estimated parameters by name"""
         self.result = None
         """:class:`list`: result of the spotpy estimation"""
         self.sens = None
-        """:class:`list`: result of the spotpy sensitivity analysis"""
+        """:class:`dict`: result of the spotpy sensitivity analysis"""
         self.testinclude = {}
         """:class:`dict`: dictonary of which tests should be included"""
 
         if testinclude is None:
-            wells = list(self.campaign.tests.keys())
-            pumpdict = {}
-            for wel in wells:
-                pumpdict[wel] = list(
-                    self.campaign.tests[wel].observations.keys()
-                )
-            self.testinclude = pumpdict
+            tests = list(self.campaign.tests.keys())
+            self.testinclude = {}
+            for test in tests:
+                self.testinclude[test] = self.campaign.tests[
+                    test
+                ].observationwells
+        elif not isinstance(testinclude, dict):
+            self.testinclude = {}
+            for test in testinclude:
+                self.testinclude[test] = self.campaign.tests[
+                    test
+                ].observationwells
         else:
             self.testinclude = testinclude
 
+        for test in self.testinclude:
+            if not isinstance(self.campaign.tests[test], testslib.PumpingTest):
+                raise ValueError(test + " is not a pumping test.")
+            if not self.campaign.tests[test].constant_rate:
+                raise ValueError(test + " is not a constant rate test.")
+            if (
+                not self.campaign.tests[test].state(
+                    wells=self.testinclude[test]
+                )
+                == "transient"
+            ):
+                raise ValueError(test + ": selection is not transient.")
+
         rwell_list = []
         rinf_list = []
-        for wel in self.testinclude:
-            rwell_list.append(self.campaign.wells[wel].radius)
-            rinf_list.append(self.campaign.tests[wel].aquiferradius)
+        for test in self.testinclude:
+            pwell = self.campaign.tests[test].pumpingwell
+            rwell_list.append(self.campaign.wells[pwell].radius)
+            rinf_list.append(self.campaign.tests[test].radius)
         self.rwell = min(rwell_list)
         """:class:`float`: radius of the pumping wells"""
         self.rinf = max(rinf_list)
@@ -208,7 +196,9 @@ class TransientPumping(object):
             Pumping rate. Default: ``-1.0``
         """
         for test in self.testinclude:
-            normpumptest(self.campaign.tests[test], pumpingrate=prate)
+            processlib.normpumptest(
+                self.campaign.tests[test], pumpingrate=prate
+            )
         self.prate = prate
 
     def settime(self, time=None, tmin=10.0, tmax=np.inf, typ="quad", steps=10):
@@ -226,13 +216,17 @@ class TransientPumping(object):
         tmax : :class:`float`, optional
             Maximal time value.
             Default: ``inf``
-        typ : :class:`str`, optional
+        typ : :class:`str` or :class:`float`, optional
             Typ of the time selection. You can select from:
 
-                * ``quad``: Quadratically increasing time steps
-                * ``geom``: Geometrically increasing time steps
-                * ``exp``: Exponentially increasing time steps
-                * ``lin``: Linear time steps
+                * ``"exp"``: for exponential behavior
+                * ``"log"``: for logarithmic behavior
+                * ``"geo"``: for geometric behavior
+                * ``"lin"``: for linear behavior
+                * ``"quad"``: for quadratic behavior
+                * ``"cub"``: for cubic behavior
+                * :class:`float`: here you can specifi any exponent
+                  ("quad" would be equivalent to 2)
 
             Default: "quad"
 
@@ -242,23 +236,15 @@ class TransientPumping(object):
         if time is None:
             for test in self.testinclude:
                 for obs in self.testinclude[test]:
-                    temptime, _ = self.campaign.tests[test].observations[obs]()
+                    _, temptime = self.campaign.tests[test].observations[obs]()
                     tmin = max(tmin, temptime.min())
                     tmax = min(tmax, temptime.max())
                     tmin = tmax if tmin > tmax else tmin
-
-            if typ in ["geom", "exp", "exponential"]:
-                time = np.geomspace(tmin, tmax, steps)
-            elif typ == "quad":
-                time = np.power(
-                    np.linspace(np.sqrt(tmin), np.sqrt(tmax), steps), 2
-                )
-            else:
-                time = np.linspace(tmin, tmax, steps)
+            time = ana.specialrange(tmin, tmax, steps, typ)
 
         for test in self.testinclude:
             for obs in self.testinclude[test]:
-                filterdrawdown(
+                processlib.filterdrawdown(
                     self.campaign.tests[test].observations[obs], tout=time
                 )
 
@@ -273,12 +259,12 @@ class TransientPumping(object):
         rad = np.array([])
         data = None
 
-        radnames = np.array([])
+        radnames = []
 
         for test in self.testinclude:
             pwell = self.campaign.wells[self.campaign.tests[test].pumpingwell]
             for obs in self.testinclude[test]:
-                _, temphead = self.campaign.tests[test].observations[obs]()
+                temphead, _ = self.campaign.tests[test].observations[obs]()
                 temphead = np.array(temphead).reshape(-1)[np.newaxis].T
 
                 if data is None:
@@ -294,12 +280,12 @@ class TransientPumping(object):
                     temprad = pwell - owell
                 rad = np.hstack((rad, temprad))
 
-                tempname = self.campaign.tests[test].pumpingwell + "-" + obs
-                radnames = np.hstack((radnames, tempname))
+                tempname = (self.campaign.tests[test].pumpingwell, obs)
+                radnames.append(tempname)
 
         # sort everything by the radii
         idx = rad.argsort()
-
+        radnames = np.array(radnames)
         self.rad = rad[idx]
         self.data = data[:, idx]
         self.radnames = radnames[idx]
@@ -313,11 +299,11 @@ class TransientPumping(object):
         ----------
         prate_kw : :class:`str`, optional
             Keyword name for the pumping rate in the used type curve.
-            Default: "Qw"
+            Default: "rate"
         rad_kw : :class:`str`, optional
             Keyword name for the radius in the used type curve.
             Default: "rad"
-        prate_kw : :class:`str`, optional
+        time_kw : :class:`str`, optional
             Keyword name for the time in the used type curve.
             Default: "time"
         dummy : :class:`bool`, optional
@@ -331,7 +317,7 @@ class TransientPumping(object):
         self.setup_kw["val_fix"].setdefault(time_kw, self.time)
         self.setup_kw.setdefault("data", self.data)
         self.setup_kw["dummy"] = dummy
-        self.setup = TypeCurve(**self.setup_kw)
+        self.setup = spotpylib.TypeCurve(**self.setup_kw)
 
     def run(
         self,
@@ -344,6 +330,7 @@ class TransientPumping(object):
         fittingplotname=None,
         interactplotname=None,
         estname=None,
+        plot_style="WTP",
     ):
         """Run the estimation.
 
@@ -392,11 +379,13 @@ class TransientPumping(object):
             If ``None``, it will be the current time +
             ``"_estimate"``.
             Default: ``None``
+        plot_style : str, optional
+            Plot stlye. The default is "WTP".
         """
         if self.setup.dummy:
             raise ValueError(
                 "Estimate: for parameter estimation"
-                + " you can't use a dummy paramter."
+                " you can't use a dummy paramter."
             )
         act_time = timemodule.strftime("%Y-%m-%d_%H-%M-%S")
 
@@ -449,51 +438,61 @@ class TransientPumping(object):
         else:
             rank = 0
 
+        # initialize the sampler
+        sampler = spotpy.algorithms.sceua(
+            self.setup,
+            dbname=dbname,
+            dbformat="csv",
+            parallel=parallel,
+            save_sim=True,
+            db_precision=np.float64,
+        )
+        # start the estimation with the sce-ua algorithm
         if run:
-            # initialize the sampler
-            sampler = spotpy.algorithms.sceua(
-                self.setup,
-                dbname=dbname,
-                dbformat="csv",
-                parallel=parallel,
-                save_sim=True,
-                db_precision=np.float64,
-            )
-            # start the estimation with the sce-ua algorithm
             sampler.sample(rep, ngs=10, kstop=100, pcento=1e-4, peps=1e-3)
 
-            if rank == 0:
-                # save best parameter-set
-                self.result = sampler.getdata()
-                para_opt = spotpy.analyser.get_best_parameterset(
-                    self.result, maximize=False
-                )
-                void_names = para_opt.dtype.names
-                self.para = []
-                for name in void_names:
-                    self.para.append(para_opt[0][name])
-                np.savetxt(paraname, self.para)
-
         if rank == 0:
+            # save best parameter-set
+            if run:
+                self.result = sampler.getdata()
+            else:
+                self.result = np.genfromtxt(
+                    dbname + ".csv", delimiter=",", names=True
+                )
+            para_opt = spotpy.analyser.get_best_parameterset(
+                self.result, maximize=False
+            )
+            void_names = para_opt.dtype.names
+            para = []
+            header = []
+            for name in void_names:
+                para.append(para_opt[0][name])
+                header.append(name[3:])
+                self.estimated_para[header[-1]] = para[-1]
+            np.savetxt(paraname, para, header=" ".join(header))
             # plot the estimation-results
-            plotparatrace(
+            plotter.plotparatrace(
                 self.result,
                 parameternames=paranames,
                 parameterlabels=paralabels,
-                stdvalues=self.para,
-                filename=traceplotname,
+                stdvalues=self.estimated_para,
+                plotname=traceplotname,
+                style=plot_style,
             )
-            plotfit_transient(
-                self.setup,
-                self.data,
-                self.para,
-                self.rad,
-                self.time,
-                self.radnames,
-                fittingplotname,
-                self.extra_kw_names,
+            plotter.plotfit_transient(
+                setup=self.setup,
+                data=self.data,
+                para=self.estimated_para,
+                rad=self.rad,
+                time=self.time,
+                radnames=self.radnames,
+                extra=self.extra_kw_names,
+                plotname=fittingplotname,
+                style=plot_style,
             )
-            plotparainteract(self.result, paralabels, interactplotname)
+            plotter.plotparainteract(
+                self.result, paralabels, interactplotname, style=plot_style
+            )
 
     def sensitivity(
         self,
@@ -504,6 +503,7 @@ class TransientPumping(object):
         plotname=None,
         traceplotname=None,
         sensname=None,
+        plot_style="WTP",
     ):
         """Run the sensitivity analysis.
 
@@ -511,7 +511,7 @@ class TransientPumping(object):
         ----------
         rep : :class:`int`, optional
             The number of repetitions within the FAST algorithm in spotpy.
-            Default: ``5000``
+            Default: estimated
         parallel : :class:`str`, optional
             State if the estimation should be run in parallel or not. Options:
 
@@ -543,9 +543,18 @@ class TransientPumping(object):
             If ``None``, it will be the current time +
             ``"_estimate"``.
             Default: ``None``
+        plot_style : str, optional
+            Plot stlye. The default is "WTP".
         """
+        if len(self.setup.para_names) == 1 and not self.setup.dummy:
+            raise ValueError(
+                "Sensitivity: for estimation with only one parameter"
+                " you have to use a dummy paramter."
+            )
         if rep is None:
-            rep = fast_rep(len(self.setup.para_names) + int(self.setup.dummy))
+            rep = spotpylib.fast_rep(
+                len(self.setup.para_names) + int(self.setup.dummy)
+            )
 
         act_time = timemodule.strftime("%Y-%m-%d_%H-%M-%S")
         # generate the filenames
@@ -616,319 +625,25 @@ class TransientPumping(object):
             parmin = sampler.parameter()["minbound"]
             parmax = sampler.parameter()["maxbound"]
             bounds = list(zip(parmin, parmax))
-            self.sens = sampler.analyze(
+            sens_est = sampler.analyze(
                 bounds, np.nan_to_num(data["like1"]), len(paranames), paranames
             )
-            np.savetxt(sensname, self.sens["ST"])
-            np.savetxt(sensname1, self.sens["S1"])
-            plotsensitivity(paralabels, self.sens, plotname)
-            plotparatrace(
+            self.sens = {}
+            for sen_typ in sens_est:
+                self.sens[sen_typ] = {
+                    par: sen for par, sen in zip(paranames, sens_est[sen_typ])
+                }
+            header = " ".join(paranames)
+            np.savetxt(sensname, sens_est["ST"], header=header)
+            np.savetxt(sensname1, sens_est["S1"], header=header)
+            plotter.plotsensitivity(
+                paralabels, sens_est, plotname, style=plot_style
+            )
+            plotter.plotparatrace(
                 data,
                 parameternames=paranames,
                 parameterlabels=paralabels,
                 stdvalues=None,
-                filename=traceplotname,
+                plotname=traceplotname,
+                style=plot_style,
             )
-
-
-# ext_theis_3D
-
-
-class ExtTheis3D(TransientPumping):
-    """Class for an estimation of stochastic subsurface parameters.
-
-    With this class you can run an estimation of statistical subsurface
-    parameters. It utilizes the extended theis solution in 3D which assumes
-    a log-normal distributed transmissivity field with a gaussian correlation
-    function and an anisotropy ratio 0 < e <= 1.
-
-    Parameters
-    ----------
-    name : :class:`str`
-        Name of the Estimation.
-    campaign : :class:`welltestpy.data.Campaign`
-        The pumping test campaign which should be used to estimate the
-        paramters
-    val_ranges : :class:`dict`
-        Dictionary containing the fit-ranges for each value in the type-curve.
-        Names should be as in the type-curve signiture
-        or replaced in val_kw_names.
-        Ranges should be a tuple containing min and max value.
-    val_fix : :class:`dict` or :any:`None`
-        Dictionary containing fixed values for the type-curve.
-        Names should be as in the type-curve signiture
-        or replaced in val_kw_names.
-        Default: None
-    testinclude : :class:`dict`, optional
-        dictonary of which tests should be included. If ``None`` is given,
-        all available tests are included.
-        Default: ``None``
-    generate : :class:`bool`, optional
-        State if time stepping, processed observation data and estimation
-        setup should be generated with default values.
-        Default: ``False``
-    """
-
-    def __init__(
-        self,
-        name,
-        campaign,
-        val_ranges=None,
-        val_fix=None,
-        testinclude=None,
-        generate=False,
-    ):
-        def_ranges = {
-            "mu": (-16, -2),
-            "var": (0, 10),
-            "len_scale": (1, 50),
-            "lnS": (-13, -1),
-            "anis": (0, 1),
-        }
-        val_ranges = {} if val_ranges is None else val_ranges
-        val_fix = {"lat_ext": 1.0} if val_fix is None else val_fix
-        for def_name, def_val in def_ranges.items():
-            val_ranges.setdefault(def_name, def_val)
-        fit_type = {"mu": "log", "lnS": "log"}
-        val_kw_names = {"mu": "cond_gmean", "lnS": "storage"}
-        val_plot_names = {
-            "mu": r"$\mu$",
-            "var": r"$\sigma^2$",
-            "len_scale": r"$\ell$",
-            "lnS": r"$\ln(S)$",
-            "anis": "$e$",
-        }
-        super(ExtTheis3D, self).__init__(
-            name=name,
-            campaign=campaign,
-            type_curve=ana.ext_theis_3d,
-            val_ranges=val_ranges,
-            val_fix=val_fix,
-            fit_type=fit_type,
-            val_kw_names=val_kw_names,
-            val_plot_names=val_plot_names,
-            testinclude=testinclude,
-            generate=generate,
-        )
-
-
-# ext_theis_2D
-
-
-class ExtTheis2D(TransientPumping):
-    """Class for an estimation of stochastic subsurface parameters.
-
-    With this class you can run an estimation of statistical subsurface
-    parameters. It utilizes the extended theis solution in 2D which assumes
-    a log-normal distributed transmissivity field with a gaussian correlation
-    function.
-
-    Parameters
-    ----------
-    name : :class:`str`
-        Name of the Estimation.
-    campaign : :class:`welltestpy.data.Campaign`
-        The pumping test campaign which should be used to estimate the
-        paramters
-    val_ranges : :class:`dict`
-        Dictionary containing the fit-ranges for each value in the type-curve.
-        Names should be as in the type-curve signiture
-        or replaced in val_kw_names.
-        Ranges should be a tuple containing min and max value.
-    val_fix : :class:`dict` or :any:`None`
-        Dictionary containing fixed values for the type-curve.
-        Names should be as in the type-curve signiture
-        or replaced in val_kw_names.
-        Default: None
-    testinclude : :class:`dict`, optional
-        dictonary of which tests should be included. If ``None`` is given,
-        all available tests are included.
-        Default: ``None``
-    generate : :class:`bool`, optional
-        State if time stepping, processed observation data and estimation
-        setup should be generated with default values.
-        Default: ``False``
-    """
-
-    def __init__(
-        self,
-        name,
-        campaign,
-        val_ranges=None,
-        val_fix=None,
-        testinclude=None,
-        generate=False,
-    ):
-        def_ranges = {
-            "mu": (-16, -2),
-            "var": (0, 10),
-            "len_scale": (1, 50),
-            "lnS": (-13, -1),
-        }
-        val_ranges = {} if val_ranges is None else val_ranges
-        for def_name, def_val in def_ranges.items():
-            val_ranges.setdefault(def_name, def_val)
-        fit_type = {"mu": "log", "lnS": "log"}
-        val_kw_names = {"mu": "trans_gmean", "lnS": "storage"}
-        val_plot_names = {
-            "mu": r"$\mu$",
-            "var": r"$\sigma^2$",
-            "len_scale": r"$\ell$",
-            "lnS": r"$\ln(S)$",
-        }
-        super(ExtTheis2D, self).__init__(
-            name=name,
-            campaign=campaign,
-            type_curve=ana.ext_theis_2d,
-            val_ranges=val_ranges,
-            val_fix=val_fix,
-            fit_type=fit_type,
-            val_kw_names=val_kw_names,
-            val_plot_names=val_plot_names,
-            testinclude=testinclude,
-            generate=generate,
-        )
-
-
-# neuman 2004
-
-
-class Neuman2004(TransientPumping):
-    """Class for an estimation of stochastic subsurface parameters.
-
-    With this class you can run an estimation of statistical subsurface
-    parameters. It utilizes the apparent Transmissivity from Neuman 2004
-    which assumes a log-normal distributed transmissivity field
-    with an exponential correlation function.
-
-    Parameters
-    ----------
-    name : :class:`str`
-        Name of the Estimation.
-    campaign : :class:`welltestpy.data.Campaign`
-        The pumping test campaign which should be used to estimate the
-        paramters
-    val_ranges : :class:`dict`
-        Dictionary containing the fit-ranges for each value in the type-curve.
-        Names should be as in the type-curve signiture
-        or replaced in val_kw_names.
-        Ranges should be a tuple containing min and max value.
-    val_fix : :class:`dict` or :any:`None`
-        Dictionary containing fixed values for the type-curve.
-        Names should be as in the type-curve signiture
-        or replaced in val_kw_names.
-        Default: None
-    testinclude : :class:`dict`, optional
-        dictonary of which tests should be included. If ``None`` is given,
-        all available tests are included.
-        Default: ``None``
-    generate : :class:`bool`, optional
-        State if time stepping, processed observation data and estimation
-        setup should be generated with default values.
-        Default: ``False``
-    """
-
-    def __init__(
-        self,
-        name,
-        campaign,
-        val_ranges=None,
-        val_fix=None,
-        testinclude=None,
-        generate=False,
-    ):
-        def_ranges = {
-            "mu": (-16, -2),
-            "var": (0, 10),
-            "len_scale": (1, 50),
-            "lnS": (-13, -1),
-        }
-        val_ranges = {} if val_ranges is None else val_ranges
-        for def_name, def_val in def_ranges.items():
-            val_ranges.setdefault(def_name, def_val)
-        fit_type = {"mu": "log", "lnS": "log"}
-        val_kw_names = {"mu": "trans_gmean", "lnS": "storage"}
-        val_plot_names = {
-            "mu": r"$\mu$",
-            "var": r"$\sigma^2$",
-            "len_scale": r"$\ell$",
-            "lnS": r"$\ln(S)$",
-        }
-        super(Neuman2004, self).__init__(
-            name=name,
-            campaign=campaign,
-            type_curve=ana.neuman2004,
-            val_ranges=val_ranges,
-            val_fix=val_fix,
-            fit_type=fit_type,
-            val_kw_names=val_kw_names,
-            val_plot_names=val_plot_names,
-            testinclude=testinclude,
-            generate=generate,
-        )
-
-
-# theis
-
-
-class Theis(TransientPumping):
-    """Class for an estimation of homogeneous subsurface parameters.
-
-    With this class you can run an estimation of homogeneous subsurface
-    parameters. It utilizes the theis solution.
-
-    Parameters
-    ----------
-    name : :class:`str`
-        Name of the Estimation.
-    campaign : :class:`welltestpy.data.Campaign`
-        The pumping test campaign which should be used to estimate the
-        paramters
-    val_ranges : :class:`dict`
-        Dictionary containing the fit-ranges for each value in the type-curve.
-        Names should be as in the type-curve signiture
-        or replaced in val_kw_names.
-        Ranges should be a tuple containing min and max value.
-    val_fix : :class:`dict` or :any:`None`
-        Dictionary containing fixed values for the type-curve.
-        Names should be as in the type-curve signiture
-        or replaced in val_kw_names.
-        Default: None
-    testinclude : :class:`dict`, optional
-        dictonary of which tests should be included. If ``None`` is given,
-        all available tests are included.
-        Default: ``None``
-    generate : :class:`bool`, optional
-        State if time stepping, processed observation data and estimation
-        setup should be generated with default values.
-        Default: ``False``
-    """
-
-    def __init__(
-        self,
-        name,
-        campaign,
-        val_ranges=None,
-        val_fix=None,
-        testinclude=None,
-        generate=False,
-    ):
-        def_ranges = {"mu": (-16, -2), "lnS": (-13, -1)}
-        val_ranges = {} if val_ranges is None else val_ranges
-        for def_name, def_val in def_ranges.items():
-            val_ranges.setdefault(def_name, def_val)
-        fit_type = {"mu": "log", "lnS": "log"}
-        val_kw_names = {"mu": "transmissivity", "lnS": "storage"}
-        val_plot_names = {"mu": r"$\ln(T)$", "lnS": r"$\ln(S)$"}
-        super(Theis, self).__init__(
-            name=name,
-            campaign=campaign,
-            type_curve=ana.theis,
-            val_ranges=val_ranges,
-            val_fix=val_fix,
-            fit_type=fit_type,
-            val_kw_names=val_kw_names,
-            val_plot_names=val_plot_names,
-            testinclude=testinclude,
-            generate=generate,
-        )

@@ -11,13 +11,11 @@ The following classes are provided
    combinepumptest
    filterdrawdown
 """
-from __future__ import absolute_import, division, print_function
-
 from copy import deepcopy as dcopy
 import numpy as np
 from scipy import signal
 
-from welltestpy.data.testslib import PumpingTest
+from ..data import testslib
 
 __all__ = ["normpumptest", "combinepumptest", "filterdrawdown"]
 
@@ -32,15 +30,18 @@ def normpumptest(pumptest, pumpingrate=-1.0, factor=1.0):
     factor : :class:`float`, optional
         Scaling factor that can be used for unit conversion. Default: ``1.0``
     """
-    if not isinstance(pumptest, PumpingTest):
+    if not isinstance(pumptest, testslib.PumpingTest):
         raise ValueError(str(pumptest) + " is no pumping test")
 
-    oldprate = dcopy(pumptest.pumpingrate)
+    if not pumptest.constant_rate:
+        raise ValueError(str(pumptest) + " is no constant rate pumping test")
+
+    oldprate = dcopy(pumptest.rate)
     pumptest.pumpingrate = pumpingrate
 
     for obs in pumptest.observations:
         pumptest.observations[obs].observation *= (
-            factor * pumpingrate / oldprate
+            factor * pumptest.rate / oldprate
         )
 
 
@@ -143,27 +144,27 @@ def combinepumptest(
 
     if pumpingrate is None:
         if infooftest1:
-            pumpingrate = temptest1.pumpingrate
+            pumpingrate = temptest1.rate
         else:
-            pumpingrate = temptest2.pumpingrate
+            pumpingrate = temptest2.rate
 
     normpumptest(temptest1, pumpingrate, factor1)
     normpumptest(temptest2, pumpingrate, factor2)
 
-    prate = temptest1.pumpingrate
+    prate = temptest1.rate
 
     if infooftest1:
         if pwell in temptest1.observations and pwell in temptest2.observations:
-            temptest2.delobservations(pwell)
-        aquiferdepth = temptest1.aquiferdepth
-        aquiferradius = temptest1.aquiferradius
+            temptest2.del_observations(pwell)
+        aquiferdepth = temptest1.depth
+        aquiferradius = temptest1.radius
         description = temptest1.description
         timeframe = temptest1.timeframe
     else:
         if pwell in temptest1.observations and pwell in temptest2.observations:
-            temptest1.delobservations(pwell)
-        aquiferdepth = temptest2.aquiferdepth
-        aquiferradius = temptest2.aquiferradius
+            temptest1.del_observations(pwell)
+        aquiferdepth = temptest2.depth
+        aquiferradius = temptest2.radius
         description = temptest2.description
         timeframe = temptest2.timeframe
 
@@ -171,17 +172,17 @@ def combinepumptest(
     observations.update(temptest2.observations)
 
     if infooftest1:
-        aquiferdepth = temptest1.aquiferdepth
-        aquiferradius = temptest1.aquiferradius
+        aquiferdepth = temptest1.depth
+        aquiferradius = temptest1.radius
         description = temptest1.description
         timeframe = temptest1.timeframe
     else:
-        aquiferdepth = temptest2.aquiferdepth
-        aquiferradius = temptest2.aquiferradius
+        aquiferdepth = temptest2.depth
+        aquiferradius = temptest2.radius
         description = temptest2.description
         timeframe = temptest2.timeframe
 
-    finalpt = PumpingTest(
+    finalpt = testslib.PumpingTest(
         finalname,
         pwell,
         prate,
@@ -213,25 +214,29 @@ def filterdrawdown(observation, tout=None, dxscale=2):
         Scale of time-steps used for smoothing.
         Default: ``2``
     """
-    time, head = observation()
-    time = time.reshape(-1)
-    head = head.reshape(-1)
+    head, time = observation()
+    head = np.array(head, dtype=float).reshape(-1)
+    time = np.array(time, dtype=float).reshape(-1)
 
     if tout is None:
         tout = dcopy(time)
+    tout = np.array(tout, dtype=float).reshape(-1)
+
+    if len(time) == 1:
+        return observation(time=tout, observation=np.full_like(tout, head[0]))
 
     # make the data equal-spaced to use filter with
     # a fraction of the minimal timestep
     dxv = dxscale * int((time[-1] - time[0]) / max(np.diff(time).min(), 1.0))
-
     tequal = np.linspace(time[0], time[-1], dxv)
     hequal = np.interp(tequal, time, head)
-
     # size = h.max() - h.min()
 
-    para1, para2 = signal.butter(1, 0.025)  # size/10.)
-    hfilt = signal.filtfilt(para1, para2, hequal, padlen=150)
+    try:
+        para1, para2 = signal.butter(1, 0.025)  # size/10.)
+        hfilt = signal.filtfilt(para1, para2, hequal, padlen=150)
+        hout = np.interp(tout, tequal, hfilt)
+    except ValueError:  # in this case there are to few data points
+        hout = np.interp(tout, time, head)
 
-    hout = np.interp(tout, tequal, hfilt)
-
-    observation(time=tout, observation=hout)
+    return observation(time=tout, observation=hout)

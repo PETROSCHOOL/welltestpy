@@ -4,45 +4,39 @@ welltestpy subpackage providing miscellaneous tools.
 
 .. currentmodule:: welltestpy.tools
 
-Subpackages
-^^^^^^^^^^^
-
-The following subpackages are provided
-
-.. autosummary::
-    plotter
-    trilib
-
 Included functions
 ^^^^^^^^^^^^^^^^^^
 
-The following classes and functions are provided
+The following functions are provided for point triangulation
 
 .. autosummary::
    triangulate
-   CampaignPlot
+   sym
+
+The following plotting routines are provided
+
+.. autosummary::
+   campaign_plot
    fadeline
-   plotres
-   WellPlot
-   plotfitting3D
-   plotfitting3Dtheis
+   plot_well_pos
+   campaign_well_plot
+   plotfit_transient
+   plotfit_steady
    plotparainteract
    plotparatrace
    plotsensitivity
 """
-from __future__ import absolute_import
+from . import plotter, trilib
 
-from welltestpy.tools import plotter, trilib
+from .trilib import triangulate, sym
 
-from welltestpy.tools.trilib import triangulate
-
-from welltestpy.tools.plotter import (
-    CampaignPlot,
+from .plotter import (
+    campaign_plot,
     fadeline,
-    plotres,
-    WellPlot,
-    plotfitting3D,
-    plotfitting3Dtheis,
+    plot_well_pos,
+    campaign_well_plot,
+    plotfit_transient,
+    plotfit_steady,
     plotparainteract,
     plotparatrace,
     plotsensitivity,
@@ -50,15 +44,15 @@ from welltestpy.tools.plotter import (
 
 __all__ = [
     "triangulate",
-    "CampaignPlot",
+    "sym",
+    "campaign_plot",
     "fadeline",
-    "plotres",
-    "WellPlot",
-    "plotfitting3D",
-    "plotfitting3Dtheis",
+    "plot_well_pos",
+    "campaign_well_plot",
+    "plotfit_transient",
+    "plotfit_steady",
     "plotparainteract",
     "plotparatrace",
     "plotsensitivity",
-    "plotter",
-    "trilib",
 ]
+__all__ += ["plotter", "trilib"]

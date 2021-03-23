@@ -7,423 +7,86 @@ welltestpy subpackage providing plotting routines.
 The following classes and functions are provided
 
 .. autosummary::
-   Editor
-   CampaignPlot
+   campaign_plot
+   campaign_well_plot
+   plot_pump_test
+   plot_well_pos
    fadeline
-   plotres
-   WellPlot
    plotfit_transient
-   plotfitting3D
-   plotfitting3Dtheis
+   plotfit_steady
    plotparainteract
    plotparatrace
    plotsensitivity
 """
-from __future__ import absolute_import, division, print_function
-
+# pylint: disable=C0103
+import copy
+import warnings
 import functools as ft
 
 import numpy as np
-import anaflow as ana
 
 from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
 import matplotlib.ticker as ticker
 
-# from matplotlib.widgets import TextBox
 
-# suppress the standard keybinding 's' for saving
-plt.rcParams["keymap.save"] = ""
-# use the ggplot style like R
-plt.style.use("ggplot")
+def _get_fig_ax(
+    fig=None,
+    ax=None,
+    ax_name="rectilinear",
+    sub_args=None,
+    sub_kwargs=None,
+    **fig_kwargs
+):  # pragma: no cover
+    # ax_case: 0->None (create one) or given, 1->False, 2->True
+    ax_case = 1 + int(ax) if isinstance(ax, bool) else 0
+    sub_args = (111,) if sub_args is None else sub_args
+    sub_kwargs = {} if sub_kwargs is None else sub_kwargs
+    sub_kwargs["projection"] = ax_name
+    if ax_case == 0:
+        if fig is None:
+            fig = plt.figure(**fig_kwargs) if ax is None else ax.get_figure()
+        if ax is None:
+            ax = fig.add_subplot(*sub_args, **sub_kwargs)
+        assert ax.name == ax_name
+        assert ax.get_figure() is fig
+        return fig, ax
+    # if ax=False we only want a figure
+    if ax_case == 1:
+        return plt.figure(**fig_kwargs) if fig is None else fig
+    # if ax=True we want the current axis of the given figure
+    assert fig is not None
+    return fig, fig.gca()
 
 
-class Editor(object):
-    """A 2D line editor.
+def _sort_lgd(ax, **kwargs):
+    """Show legend and sort it by names."""
+    handles, labels = ax.get_legend_handles_labels()
+    # sort both labels and handles by labels
+    labels, handles = zip(*sorted(zip(labels, handles), key=lambda t: t[0]))
+    ax.legend(handles, labels, **kwargs)
 
-    Mouse-bindings
-    --------------
-      'left/right-click'
-          select vertex
-      'left-click-n-drag'
-          move vertex vertically
-      'right-click-n-drag'
-          move vertex freely
 
-    Key-bindings
-    ------------
-        'a'
-            reset all vertices
-        'r'
-            reset the selected vertex
-        'd'
-            delete the selected vertex
-        'm'
-            set the selected vertex into middle of its neighbors
-        'n'
-            set the selected vertex vertically in line with its neighbors
-        's'
-            save the xy-data
-
-    Text-input
-    ----------
-        'Enter' :
-            save the selected observation to the given file name.
+def dashes(i=1, max_n=12, width=1):
     """
+    Dashes for matplotlib.
 
-    epsilon = 10  # max pixel distance to count as a vertex hit
+    Parameters
+    ----------
+    i : int, optional
+        Number of dots. The default is 1.
+    max_n : int, optional
+        Maximal Number of dots. The default is 12.
+    width : float, optional
+        Linewidth. The default is 1.
 
-    def __init__(self, *observ):
-        """Editor initialisation.
+    Returns
+    -------
+    list
+        dashes list for matplotlib.
 
-        Parameters
-        ----------
-        *observ
-            list of observations of type :class:`welltestpy.data.Observation`
-        """
-        self.fig, self.ax = plt.subplots()
-        self.ax.set_xlabel(observ[0].labels[0])
-        self.ax.set_ylabel(observ[0].labels[1])
-        # plt.subplots_adjust(bottom=0.2)
-        # self.axbox = plt.axes([0.1, 0.05, 0.8, 0.075])
-        # self.text_box = TextBox(self.axbox, 'save-path', initial="observ")
-        # self.text_box.on_submit(self.submit)
-        # self.linesave = []
-
-        self.linesave = observ
-
-        self.linesori = []
-        for obs in self.linesave:
-            self.linesori.append([obs.time, obs.observation])
-
-        # this is just to use the atomatic dimensioning of matplotlib
-        for x, y in self.linesori:
-            self.ax.plot(x, y, visible=False)
-
-        self.canvas = self.fig.canvas
-
-        self.lines = []
-
-        for i, xy in enumerate(self.linesori):
-            # cycle through the colors
-            c = "C" + str(i)
-            # create line_objects
-            self.lines.append(
-                Line2D(xy[0], xy[1], marker="o", color=c, animated=True)
-            )
-            # add lines to Axes
-            self.ax.add_line(self.lines[-1])
-
-        # generate the selector Point
-        self.selector = Line2D(
-            [0.0],
-            [0.0],
-            markersize=10,
-            marker="o",
-            color="k",
-            alpha=0.5,
-            animated=True,
-            visible=False,
-        )
-        self.ax.add_line(self.selector)
-
-        self._indl = None  # the active line
-        self._indv = None  # the active vert
-
-        # connect the interactive functions to the canvas
-        self.canvas.mpl_connect("draw_event", self.draw_callback)
-        self.canvas.mpl_connect("key_press_event", self.key_press_callback)
-        self.canvas.mpl_connect(
-            "button_press_event", self.button_press_callback
-        )
-        self.canvas.mpl_connect(
-            "button_release_event", self.button_release_callback
-        )
-        self.canvas.mpl_connect(
-            "motion_notify_event", self.motion_notify_callback
-        )
-        #        plt.show(block=False)
-        plt.show()
-
-    def submit(self, text):
-        """Submit action for the text-box."""
-        if self._indl is not None:
-            self.save_xy()
-            self.linesave[self._indl].save(name=text)
-            print("saved observation no {}".format(self._indl))
-        else:
-            print("no observation selected")
-
-    def save_xy(self):
-        """Save the current data."""
-        print("saving...")
-        for i, obs in enumerate(self.linesave):
-            obs.time = self.lines[i]._x
-            obs.observation = self.lines[i]._y
-
-    def draw_callback(self, event):
-        """Draw everything."""
-        self.background = self.canvas.copy_from_bbox(self.ax.bbox)
-        for line in self.lines:
-            self.ax.draw_artist(line)
-        self.ax.draw_artist(self.selector)
-
-    def key_press_callback(self, event):
-        """Whenever a key is pressed."""
-        # save all
-        if event.key == "s":
-            self.save_xy()
-
-        # reset all
-        if event.key == "a":
-            print("reseting all...")
-            self.selector.set_xdata([0.0])
-            self.selector.set_ydata([0.0])
-            self.selector.set_visible(False)
-            for i, xy in enumerate(self.linesori):
-                self.lines[i].set_xdata(xy[0])
-                self.lines[i].set_ydata(xy[1])
-            self.canvas.draw()
-
-        # reset selected
-        if event.key == "r" and self._indv is not None:
-            print("reseting vertex...")
-            self.lines[self._indl]._x[self._indv] = self.linesori[self._indl][
-                0
-            ][self._indv]
-            self.lines[self._indl]._y[self._indv] = self.linesori[self._indl][
-                1
-            ][self._indv]
-            self.selector.set_xdata([self.lines[self._indl]._x[self._indv]])
-            self.selector.set_ydata([self.lines[self._indl]._y[self._indv]])
-            self.canvas.draw()
-
-        # delete selected
-        elif event.key == "d":
-            print("deleting vertex...")
-            if self._indv is not None and len(self.lines[self._indl]._y) > 1:
-                self.lines[self._indl].set_xdata(
-                    [
-                        tup
-                        for i, tup in enumerate(
-                            self.lines[self._indl].get_xdata()
-                        )
-                        if i != self._indv
-                    ]
-                )
-                self.lines[self._indl].set_ydata(
-                    [
-                        tup
-                        for i, tup in enumerate(
-                            self.lines[self._indl].get_ydata()
-                        )
-                        if i != self._indv
-                    ]
-                )
-                self.selector.set_visible(False)
-                self.canvas.draw()
-
-        # set selected to middle of neighbors
-        if event.key == "m":
-            print("averaging vertex...")
-            if self.selector.get_visible():
-                length = len(self.lines[self._indl]._y)
-                if 0 < self._indv < length - 1:
-                    self.lines[self._indl]._x[self._indv] = 0.5 * (
-                        self.lines[self._indl]._x[self._indv - 1]
-                        + self.lines[self._indl]._x[self._indv + 1]
-                    )
-                    self.lines[self._indl]._y[self._indv] = 0.5 * (
-                        self.lines[self._indl]._y[self._indv - 1]
-                        + self.lines[self._indl]._y[self._indv + 1]
-                    )
-                    self.selector.set_xdata(
-                        self.lines[self._indl]._x[self._indv]
-                    )
-                    self.selector.set_ydata(
-                        self.lines[self._indl]._y[self._indv]
-                    )
-                    self.canvas.draw()
-
-        # set selected vertically on line with neighbors
-        if event.key == "n":
-            print("setting vertex vertically in line...")
-            if self.selector.get_visible():
-                length = len(self.lines[self._indl]._y)
-                if 0 < self._indv < length - 1:
-                    self.lines[self._indl]._y[self._indv] = (
-                        self.lines[self._indl]._x[self._indv]
-                        - self.lines[self._indl]._x[self._indv - 1]
-                    ) / (
-                        self.lines[self._indl]._x[self._indv + 1]
-                        - self.lines[self._indl]._x[self._indv - 1]
-                    ) * (
-                        self.lines[self._indl]._y[self._indv + 1]
-                        - self.lines[self._indl]._y[self._indv - 1]
-                    ) + (
-                        self.lines[self._indl]._y[self._indv - 1]
-                    )
-                elif self._indv == 0 and length > 2:
-                    self.lines[self._indl]._y[0] = (
-                        self.lines[self._indl]._x[0]
-                        - self.lines[self._indl]._x[1]
-                    ) / (
-                        self.lines[self._indl]._x[2]
-                        - self.lines[self._indl]._x[1]
-                    ) * (
-                        self.lines[self._indl]._y[2]
-                        - self.lines[self._indl]._y[1]
-                    ) + (
-                        self.lines[self._indl]._y[1]
-                    )
-                elif self._indv == length - 1 and length > 2:
-                    self.lines[self._indl]._y[self._indv] = (
-                        self.lines[self._indl]._x[self._indv]
-                        - self.lines[self._indl]._x[self._indv - 2]
-                    ) / (
-                        self.lines[self._indl]._x[self._indv - 1]
-                        - self.lines[self._indl]._x[self._indv - 2]
-                    ) * (
-                        self.lines[self._indl]._y[self._indv - 1]
-                        - self.lines[self._indl]._y[self._indv - 2]
-                    ) + (
-                        self.lines[self._indl]._y[self._indv - 2]
-                    )
-                self.selector.set_ydata(self.lines[self._indl]._y[self._indv])
-                self.canvas.draw()
-
-    def get_ind_under_point(self, event):
-        """
-        Get the index of the vertex.
-
-        under point if within epsilon tolerance
-        """
-        xy = []
-        xyt = []
-        xt = []
-        yt = []
-        d = []
-        indseq = []
-        ind = []
-        # display coords
-        for line in self.lines:
-            xy.append(np.asarray(line._xy))
-            xyt.append(line.get_transform().transform(xy[-1]))
-            xt.append(xyt[-1][:, 0])
-            yt.append(xyt[-1][:, 1])
-            d.append(
-                np.sqrt((xt[-1] - event.x) ** 2 + (yt[-1] - event.y) ** 2)
-            )
-            # select the first nearest vertex of the current line
-            indseq.append(np.nonzero(np.equal(d[-1], np.amin(d[-1])))[0])
-            ind.append(indseq[-1][0])
-            if d[-1][ind[-1]] >= self.epsilon:
-                ind[-1] = None
-
-        # serch for the supreme line of selected indices
-        for indl, indv in reversed(list(enumerate(ind))):
-            if indv is not None:
-                break
-
-        return indl, indv
-
-    def button_press_callback(self, event):
-        """Whenever a mouse button is pressed."""
-        if event.inaxes is None:
-            return
-        if event.button != 1 and event.button != 3:
-            self.selector.set_visible(False)
-            self.draw_callback(None)
-            self.canvas.draw()
-            return
-        if event.button == 1 or event.button == 3:
-            self._indl, self._indv = self.get_ind_under_point(event)
-            if not (self._indl is None or self._indv is None):
-                # show the selector
-                self.selector.set_xdata(self.lines[self._indl]._x[self._indv])
-                self.selector.set_ydata(self.lines[self._indl]._y[self._indv])
-                self.selector.set_visible(True)
-                self.canvas.draw()
-            else:
-                # hide the selector
-                self.selector.set_xdata(0.0)
-                self.selector.set_ydata(0.0)
-                self.selector.set_visible(False)
-                self.canvas.draw()
-
-    def button_release_callback(self, event):
-        """Whenever a mouse button is released."""
-        return
-
-    def motion_notify_callback(self, event):
-        """On mouse movement."""
-        if self._indv is None:
-            return
-        if event.inaxes is None:
-            return
-        if event.button == 1:
-            # just vertical movement with left click
-            y = event.ydata
-
-            self.lines[self._indl]._y[self._indv] = y
-            self.selector.set_ydata([y])
-
-            # erase current picture
-            self.canvas.restore_region(self.background)
-            # draw the updated line
-            for line in self.lines:
-                self.ax.draw_artist(line)
-            self.ax.draw_artist(self.selector)
-            # update the canvas with the axis content
-            self.canvas.blit(self.ax.bbox)
-
-        if event.button == 3:
-            # freely movement with right click
-            x, y = event.xdata, event.ydata
-
-            self.lines[self._indl]._xy[self._indv] = x, y
-            self.selector.set_xdata([x])
-            self.selector.set_ydata([y])
-
-            # erase current picture
-            self.canvas.restore_region(self.background)
-            # draw the updated line
-            for line in self.lines:
-                self.ax.draw_artist(line)
-            self.ax.draw_artist(self.selector)
-            # update the canvas with the axes content
-            self.canvas.blit(self.ax.bbox)
-
-
-#####
-
-
-def CampaignPlot(campaign, select_test=None, **kwargs):
-    """Plotting an overview of the tests within the campaign."""
-    if select_test is None:
-        tests = list(campaign.tests.keys())
-    else:
-        tests = select_test
-
-    tests.sort()
-    nroftests = len(tests)
-    fig = plt.figure(dpi=75, figsize=[8, 3 * nroftests])
-
-    for n, t in enumerate(tests):
-        ax = fig.add_subplot(nroftests, 1, n + 1)
-        campaign.tests[t]._addplot(ax, campaign.wells)
-
-    if "xscale" in kwargs:
-        ax.set_xscale(kwargs["xscale"])
-    if "yscale" in kwargs:
-        ax.set_yscale(kwargs["yscale"])
-
-    fig.tight_layout()
-    plt.show()
-
-
-####
+    """
+    return i * [width, width] + [max_n * 2 * width - 2 * i * width, width]
 
 
 def fadeline(ax, x, y, label=None, color=None, steps=20, **kwargs):
@@ -434,6 +97,7 @@ def fadeline(ax, x, y, label=None, color=None, steps=20, **kwargs):
     Parameters
     ----------
     ax : axis
+        Axis to plot on.
     x : :class:`list`
         start and end value of x components of the line
     y : :class:`list`
@@ -453,37 +117,336 @@ def fadeline(ax, x, y, label=None, color=None, steps=20, **kwargs):
     xarr = np.linspace(x[0], x[1], steps + 1)
     yarr = np.linspace(y[0], y[1], steps + 1)
 
+    kwargs.pop("label", None)
+    kwargs.pop("alpha", None)
+    kwargs["color"] = color
+    kwargs["solid_capstyle"] = "butt"
+
     for i in range(steps):
-        if i == 0:
-            label0 = label
-        else:
-            label0 = None
-        ax.plot(
-            [xarr[i], xarr[i + 1]],
-            [yarr[i], yarr[i + 1]],
-            label=label0,
-            color=color,
-            alpha=(steps - i) * (1.0 / steps),
-            **kwargs
+        kwargs["label"] = label if i == 0 else None
+        kwargs["alpha"] = (steps - i) * (1.0 / steps) * 0.9 + 0.1
+        ax.plot([xarr[i], xarr[i + 1]], [yarr[i], yarr[i + 1]], **kwargs)
+
+
+def campaign_plot(campaign, select_test=None, fig=None, style="WTP", **kwargs):
+    """
+    Plot an overview of the tests within the campaign.
+
+    Parameters
+    ----------
+    campaign : :class:`Campaign`
+        The campaign to be plotted.
+    select_test : dict, optional
+        The selected tests to be added to the plot. The default is None.
+    fig : Figure, optional
+        Matplotlib figure to plot on. The default is None.
+    style : str, optional
+        Plot stlye. The default is "WTP".
+    **kwargs : TYPE
+        Keyword arguments forwarded to the tests plotting routines.
+
+    Returns
+    -------
+    fig : Figure
+        The created matplotlib figure.
+    """
+    if select_test is None:
+        tests = list(campaign.tests.keys())
+    else:
+        tests = select_test
+
+    tests.sort()
+    nroftests = len(tests)
+    style = copy.deepcopy(plt.rcParams) if style is None else style
+    keep_fs = False
+    if style == "WTP":
+        style = "ggplot"
+        font_size = plt.rcParams.get("font.size", 10.0)
+        keep_fs = True
+    with plt.style.context(style):
+        if keep_fs:
+            plt.rcParams.update({"font.size": font_size})
+        fig = _get_fig_ax(fig, ax=False, dpi=75, figsize=[8, 3 * nroftests])
+
+        for n, t in enumerate(tests):
+            ax = fig.add_subplot(nroftests, 1, n + 1)
+            # call the plotting routine of the test
+            campaign.tests[t].plot(wells=campaign.wells, ax=ax, **kwargs)
+
+        fig.tight_layout()
+        fig.show()
+    return fig
+
+
+def campaign_well_plot(
+    campaign, plot_tests=True, plot_well_names=True, fig=None, style="WTP"
+):
+    """
+    Plot of the well constellation within the campaign.
+
+    Parameters
+    ----------
+    campaign : :class:`Campaign`
+        The campaign to be plotted.
+    plot_tests : bool, optional
+        DESCRIPTION. The default is True.
+    plot_well_names : TYPE, optional
+        DESCRIPTION. The default is True.
+    fig : Figure, optional
+        Matplotlib figure to plot on. The default is None.
+    style : str, optional
+        Plot stlye. The default is "WTP".
+
+    Returns
+    -------
+    ax : Axes
+        The created matplotlib axes.
+
+    """
+    well_const0 = []
+    names = []
+
+    for w in campaign.wells:
+        well_const0.append(
+            [campaign.wells[w].pos[0], campaign.wells[w].pos[1]]
         )
+        names.append(w)
+    well_const = [well_const0]
+
+    fig = plot_well_pos(
+        well_const,
+        names,
+        plot_well_names=plot_well_names,
+        fig=fig,
+        style=style,
+    )
+
+    style = copy.deepcopy(plt.rcParams) if style is None else style
+    keep_fs = False
+    if style == "WTP":
+        style = "ggplot"
+        font_size = plt.rcParams.get("font.size", 10.0)
+        keep_fs = True
+    with plt.style.context(style):
+        if keep_fs:
+            plt.rcParams.update({"font.size": font_size})
+        clrs = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+        clr_n = len(clrs)
+
+        fig, ax = _get_fig_ax(fig, ax=True)
+
+        if plot_tests:
+            testlist = list(campaign.tests.keys())
+            testlist.sort()
+            for i, t in enumerate(testlist):
+                p_well = campaign.tests[t].pumpingwell
+                for j, obs in enumerate(campaign.tests[t].observations):
+                    x0 = campaign.wells[p_well].pos[0]
+                    y0 = campaign.wells[p_well].pos[1]
+                    x1 = campaign.wells[obs].pos[0]
+                    y1 = campaign.wells[obs].pos[1]
+                    label = "{}".format(t) if j == 0 else None
+                    fadeline(
+                        ax=ax,
+                        x=[x0, x1],
+                        y=[y0, y1],
+                        label=label,
+                        color=clrs[(i + 2) % clr_n],
+                        linewidth=3,
+                        zorder=10,
+                    )
+        # get equal axis (for realism)
+        ax.axis("equal")
+        ax.legend(title="Test at", loc="upper left", bbox_to_anchor=(1, 1))
+        fig.tight_layout()
+        fig.show()
+    return ax
 
 
-def plotres(res, names=None, title="", filename=None, plot_well_names=True):
-    """Plots all solutions in res and label the points with the names."""
+def plot_pump_test(
+    pump_test, wells, exclude=None, fig=None, ax=None, style="WTP", **kwargs
+):
+    """Plot a pumping test.
+
+    Parameters
+    ----------
+    pump_test: :class:`PumpingTest`
+        Pumping test class that should be plotted.
+    wells : :class:`dict`
+        Dictonary containing the well classes sorted by name.
+    exclude: :class:`list`, optional
+        List of wells that should be excluded from the plot.
+        Default: ``None``
+    fig : Figure, optional
+        Matplotlib figure to plot on. The default is None.
+    ax : :class:`Axes`
+        Matplotlib axes to plot on. The default is None.
+    style : str, optional
+        Plot stlye. The default is "WTP".
+
+    Returns
+    -------
+    ax : Axes
+        The created matplotlib axes.
+
+    Notes
+    -----
+    This will be used by the Campaign class.
+    """
+    style = copy.deepcopy(plt.rcParams) if style is None else style
+    keep_fs = False
+    if style == "WTP":
+        style = "ggplot"
+        font_size = plt.rcParams.get("font.size", 10.0)
+        keep_fs = True
+    with plt.style.context(style):
+        if keep_fs:
+            plt.rcParams.update({"font.size": font_size})
+        clrs = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+        clr_n = len(clrs)
+        fig, ax = _get_fig_ax(fig, ax)
+        exclude = set() if exclude is None else set(exclude)
+        well_set = set(wells)
+        test_wells = set(pump_test.observationwells)
+        plot_wells = list((well_set & test_wells) - exclude)
+        # sort by radius
+        plot_wells.sort(key=lambda x: wells[x] - wells[pump_test.pumpingwell])
+        state = pump_test.state(wells=plot_wells)
+        steady_guide_x = []
+        steady_guide_y = []
+        # label for absolute values
+        abslab = "abs. " if ("abs_val" in kwargs and kwargs["abs_val"]) else ""
+        if state == "mixed":
+            ax1 = ax
+            ax2 = ax1.twiny()
+        elif state == "transient":
+            ax1 = ax
+            ax2 = None
+        elif state == "steady":
+            ax1 = None
+            ax2 = ax
+        else:
+            raise ValueError("plot_pump_test: unknow state of pumping test.")
+        for i, k in enumerate(plot_wells):
+            if k != pump_test.pumpingwell:
+                dist = wells[k] - wells[pump_test.pumpingwell]
+            else:
+                dist = wells[pump_test.pumpingwell].radius
+            if pump_test.observations[k].state == "transient":
+                if abslab:
+                    displace = np.abs(pump_test.observations[k].value[0])
+                else:
+                    displace = pump_test.observations[k].value[0]
+                ax1.plot(
+                    pump_test.observations[k].value[1],
+                    displace,
+                    linewidth=2,
+                    color=clrs[i % clr_n],
+                    label=(
+                        pump_test.observations[k].name
+                        + " r={:1.2f}".format(dist)
+                    ),
+                )
+                ax1.set_xlabel(pump_test.observations[k].labels[0])
+                ax1.set_ylabel(
+                    abslab + "{}".format(pump_test.observations[k].labels[1])
+                )
+            else:
+                if abslab:
+                    displace = np.abs(pump_test.observations[k].value)
+                else:
+                    displace = pump_test.observations[k].value
+                steady_guide_x.append(dist)
+                steady_guide_y.append(displace)
+                label = pump_test.observations[k].name + " r={:1.2f}".format(
+                    dist
+                )
+                color = "C{}".format(i % 10)
+                ax2.scatter(dist, displace, color=color, label=label)
+                ax2.set_xlabel("r in {}".format(wells[k].coordinates.units))
+                ax2.set_ylabel(
+                    abslab + "{}".format(pump_test.observations[k].labels)
+                )
+
+        if state != "transient":
+            steady_guide_x = np.array(steady_guide_x, dtype=float)
+            steady_guide_y = np.array(steady_guide_y, dtype=float)
+            arg = np.argsort(steady_guide_x)
+            steady_guide_x = steady_guide_x[arg]
+            steady_guide_y = steady_guide_y[arg]
+            ax2.plot(steady_guide_x, steady_guide_y, color="k", alpha=0.1)
+
+        if "title" not in kwargs or not kwargs["title"] is False:
+            ax.set_title(repr(pump_test))
+        if "xscale" in kwargs:
+            ax.set_xscale(kwargs["xscale"])
+        if "yscale" in kwargs:
+            ax.set_yscale(kwargs["yscale"])
+
+        ax.legend(
+            title="Pumping test '{}'".format(pump_test.name),
+            loc="upper left",
+            bbox_to_anchor=(1, 1),
+        )
+        if state == "mixed":  # add a second legend
+            ax2.legend(loc="upper right", fancybox=True, framealpha=0.75)
+    return ax
+
+
+####
+
+
+def plot_well_pos(
+    well_const,
+    names=None,
+    title="",
+    filename=None,
+    plot_well_names=True,
+    ticks_set="auto",
+    fig=None,
+    style="WTP",
+):
+    """
+    Plot all well constellations and label the points with the names.
+
+    Parameters
+    ----------
+    well_const : list
+        List of well constellations.
+    names : list of str, optional
+        Names for the wells. The default is None.
+    title : str, optional
+        Plot title. The default is "".
+    filename : str, optional
+        Filename if the result should be saved. The default is None.
+    plot_well_names : bool, optional
+        Whether to plot the well-names. The default is True.
+    ticks_set : int or str, optional
+        Tick spacing in the plot. The default is "auto".
+    fig : Figure, optional
+        Matplotlib figure to plot on. The default is None.
+    style : str, optional
+        Plot stlye. The default is "WTP".
+
+    Returns
+    -------
+    fig : Figure
+        The created matplotlib figure.
+    """
     # calculate Column- and Row-count for quadratic shape of the plot
     # total number of plots
-    Tot = len(res)
+    total_n = len(well_const)
     # columns near the square-root but tendentially wider than tall
-    Cols = int(np.ceil(np.sqrt(Tot)))
+    col_n = int(np.ceil(np.sqrt(total_n)))
     # enough rows to catch all plots
-    Rows = int(np.ceil(Tot / Cols))
+    row_n = int(np.ceil(total_n / col_n))
     # Possition numbers as array
-    Pos = np.arange(Tot) + 1
+    pos_tuple = np.arange(total_n) + 1
 
     # generate names for points if undefined
     if names is None:
         names = []
-        for i in range(len(res[0])):
+        for i in range(len(well_const[0])):
             names.append("p" + str(i))
 
     # genearte commen borders for all plots
@@ -492,7 +455,7 @@ def plotres(res, names=None, title="", filename=None, plot_well_names=True):
     ymax = -np.inf
     ymin = np.inf
 
-    for i in res:
+    for i in well_const:
         for j in i:
             xmax = max(j[0], xmax)
             xmin = min(j[0], xmin)
@@ -503,328 +466,335 @@ def plotres(res, names=None, title="", filename=None, plot_well_names=True):
     space = 0.1 * max(abs(xmax - xmin), abs(ymax - ymin))
     xspace = yspace = space
 
-    fig = plt.figure(dpi=75, figsize=[9 * Cols, 5 * Rows])
-    # fig.suptitle("well locations and pumping tests at " + title, fontsize=18)
+    if ticks_set == "auto":
+        # bit hacky auto-ticking to be more pleasant for the eyes
+        tick_list = [1, 2, 5, 10]
+        tk_space = space * 10 / 7  # assume about 7 ticks
+        scaling = np.log10(tk_space)
+        if np.log10(0.4) < scaling < 1:
+            # if space is less 10, choose nearest value in tick_list (by log)
+            ticks_set = min(tick_list, key=lambda x: abs(np.log(x / tk_space)))
+        else:
+            # k * 10 ** n as ticks (0.1, 0.2, ..., 10, 20, ..., 100, 200, ...)
+            space_pot = 10 ** int(np.floor(scaling))
+            ticks_set = space_pot * int(np.around(tk_space / space_pot))
 
-    for i, result in enumerate(res):
-        ax = fig.add_subplot(Rows, Cols, Pos[i])
-        ax.set_xlim([xmin - xspace, xmax + xspace])
-        ax.set_ylim([ymin - yspace, ymax + yspace])
-        ax.set_aspect("equal")
+    style = copy.deepcopy(plt.rcParams) if style is None else style
+    keep_fs = False
+    if style == "WTP":
+        style = "ggplot"
+        font_size = plt.rcParams.get("font.size", 10.0)
+        keep_fs = True
+    with plt.style.context(style):
+        if keep_fs:
+            plt.rcParams.update({"font.size": font_size})
+        fig = _get_fig_ax(
+            fig, ax=False, dpi=100, figsize=[9 * col_n, 5 * row_n]
+        )
 
-        for j, name in enumerate(names):
-            ax.scatter(result[j][0], result[j][1], color="k", zorder=10)
-            if plot_well_names:
-                ax.annotate("  " + name, (result[j][0], result[j][1]))
+        for i, wells in enumerate(well_const):
+            ax = fig.add_subplot(row_n, col_n, pos_tuple[i])
+            ax.set_xlim([xmin - xspace, xmax + xspace])
+            ax.set_ylim([ymin - yspace, ymax + yspace])
+            ax.set_aspect("equal")
 
-        ax.xaxis.set_major_locator(ticker.MultipleLocator(5))
-        ax.yaxis.set_major_locator(ticker.MultipleLocator(5))
-        ax.set_xlabel("x distance in $[m]$")  # , fontsize=16)
-        ax.set_ylabel("y distance in $[m]$")  # , fontsize=16)
+            for j, name in enumerate(names):
+                ax.scatter(wells[j][0], wells[j][1], color="k", zorder=100)
+                if plot_well_names:
+                    ax.annotate(
+                        "  " + name, (wells[j][0], wells[j][1]), zorder=100
+                    )
+            ax.xaxis.set_major_locator(ticker.MultipleLocator(ticks_set))
+            ax.yaxis.set_major_locator(ticker.MultipleLocator(ticks_set))
+            ax.set_xlabel("x $[m]$")
+            ax.set_ylabel("y $[m]$")
+            if total_n > 1:
+                ax.set_title("Result {}".format(i))
 
-    fig.tight_layout(rect=[0, 0, 1, 0.95])
+        if title:
+            fig.suptitle(title)
+        fig.tight_layout(rect=[0, 0, 1, 0.95])
+        if filename is not None:
+            fig.savefig(filename, format="pdf")
 
-    if filename is not None:
-        plt.savefig(filename, format="pdf")
-
-    return fig, ax
+    return fig
 
 
 ######
 
 
-def WellPlot(campaign, plot_tests=True, plot_well_names=True):
-    """Plotting of the wellconstellation within the campaign."""
-    res0 = []
-    names = []
-
-    for w in campaign.wells:
-        res0.append(
-            [
-                campaign.wells[w].coordinates[0],
-                campaign.wells[w].coordinates[1],
-            ]
-        )
-        names.append(w)
-    res = [res0]
-
-    fig, ax = plotres(
-        res, names, campaign.name, plot_well_names=plot_well_names
-    )
-
-    if plot_tests:
-        testlist = list(campaign.tests.keys())
-        testlist.sort()
-        for i, t in enumerate(testlist):
-            for j, obs in enumerate(campaign.tests[t].observations):
-                x0 = campaign.wells[campaign.tests[t].pumpingwell].coordinates[
-                    0
-                ]
-                y0 = campaign.wells[campaign.tests[t].pumpingwell].coordinates[
-                    1
-                ]
-                x1 = campaign.wells[obs].coordinates[0]
-                y1 = campaign.wells[obs].coordinates[1]
-                if j == 0:
-                    label = "test at " + t
-                else:
-                    label = None
-                fadeline(
-                    ax,
-                    [x0, x1],
-                    [y0, y1],
-                    label,
-                    "C" + str((i + 2) % 10),
-                    linestyle=":",
-                )
-    # get equal axis (for realism)
-    ax.axis("equal")
-    ax.legend()
-    plt.show()
-    return fig, ax
-
-
 # Estimation plotting
 
 
-def plotfit_transient(setup, data, para, rad, time, radnames, plotname, extra):
+def plotfit_transient(
+    setup,
+    data,
+    para,
+    rad,
+    time,
+    radnames,
+    extra,
+    plotname=None,
+    fig=None,
+    ax=None,
+    style="WTP",
+):
     """Plot of transient estimation fitting."""
-    val_fix = setup.val_fix
-    for kwarg in ["time", "rad"]:
-        val_fix.pop(extra[kwarg], None)
+    style = copy.deepcopy(plt.rcParams) if style is None else style
+    keep_fs = False
+    if style == "WTP":
+        style1 = "ggplot"
+        style2 = "default"
+        font_size = plt.rcParams.get("font.size", 10.0)
+        # font type fix
+        pdf_ft = plt.rcParams.get("pdf.fonttype", 42)
+        ps_ft = plt.rcParams.get("ps.fonttype", 42)
+        keep_fs = True
+    else:
+        style1 = style2 = style
+    with plt.style.context(style1):
+        clrs = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+        clr_n = len(clrs)
+    with plt.style.context(style2):
+        if keep_fs:
+            # font type fix (resetted in default)
+            plt.rcParams.update({"pdf.fonttype": pdf_ft, "ps.fonttype": ps_ft})
+            plt.rcParams.update({"font.size": font_size})
+        fig, ax = _get_fig_ax(fig, ax, ax_name=Axes3D.name, figsize=(7.5, 7))
+        val_fix = setup.val_fix
+        for kwarg in ["time", "rad"]:
+            val_fix.pop(extra[kwarg], None)
 
-    para_kw = setup.get_sim_kwargs(para)
+        para_ordered = np.empty(len(setup.para_names))
+        for i, name in enumerate(setup.para_names):
+            para_ordered[i] = para[name]
+        para_kw = setup.get_sim_kwargs(para_ordered)
+        val_fix.update(para_kw)
+
+        plot_f = ft.partial(setup.func, **val_fix)
+
+        radarr = np.linspace(rad.min(), rad.max(), 100)
+        timarr = np.linspace(time.min(), time.max(), 100)
+
+        t_gen = np.ones_like(radarr)
+        r_gen = np.ones_like(time)
+        r_gen1 = np.ones_like(timarr)
+        xydir = np.zeros_like(time)
+        test_name = list(np.unique(radnames[:, 0]))
+        test_name.sort()
+        __, rad_un_idx = np.unique(rad, return_index=True)
+        for ri, re in enumerate(rad):
+            r1 = re * r_gen
+            r11 = re * r_gen1
+            h = plot_f(**{extra["time"]: time, extra["rad"]: re}).reshape(-1)
+            h1 = data[:, ri]
+            h2 = plot_f(**{extra["time"]: timarr, extra["rad"]: re}).reshape(
+                -1
+            )
+            color = clrs[(test_name.index(radnames[ri, 0]) + 2) % clr_n]
+            alpha = 0.3 * (1 - (re - min(rad)) / (max(rad) - min(rad))) + 0.3
+            zord = 100 * (len(rad) - ri)
+
+            if radnames[ri, 0] == radnames[ri, 1]:
+                label = radnames[ri, 0]
+                label_eff = "type curve"
+                eff_zord = zord + 100  # first line should be on top
+            else:
+                label = None
+                label_eff = None
+                eff_zord = 1
+            if ri in rad_un_idx:
+                ax.plot(
+                    r11,
+                    timarr,
+                    h2,
+                    zorder=eff_zord,
+                    color="k",
+                    alpha=alpha,
+                    label=label_eff,
+                )
+            ax.quiver(
+                r1,
+                time,
+                h,
+                xydir,
+                xydir,
+                h1 - h,
+                alpha=0.6,
+                arrow_length_ratio=0.0,
+                color=color,
+                zorder=zord + 30,
+            )
+            ax.scatter(
+                r1,
+                time,
+                h1,
+                depthshade=False,
+                zorder=zord + 60,
+                color=color,
+                label=label,
+            )
+
+        for te in time:
+            t11 = te * t_gen
+            h = plot_f(**{extra["time"]: te, extra["rad"]: radarr}).reshape(-1)
+            ax.plot(radarr, t11, h, color="k", alpha=0.1, linestyle="--")
+
+        ax.view_init(elev=30, azim=130)
+        ax.set_xlabel(r"$r$ in $\left[\mathrm{m}\right]$", labelpad=20)
+        ax.set_ylabel(r"$t$ in $\left[\mathrm{s}\right]$", labelpad=20)
+        ax.set_zlabel(r"$\tilde{h}$ in $\left[\mathrm{m}\right]$", labelpad=10)
+        _sort_lgd(
+            ax,
+            loc="lower center",
+            markerscale=2,
+            bbox_to_anchor=(0.5, -0.1),
+            ncol=5,
+            columnspacing=1.0,
+            handletextpad=0.5,
+            handlelength=1.0,
+        )
+        fig.tight_layout()
+        fig.subplots_adjust(top=1, left=0, right=0.9)
+        if plotname is not None:
+            fig.savefig(plotname, format="pdf")
+
+    return ax
+
+
+def plotfit_steady(
+    setup,
+    data,
+    para,
+    rad,
+    radnames,
+    extra,
+    plotname=None,
+    ax_ins=True,
+    fig=None,
+    ax=None,
+    style="WTP",
+):
+    """Plot of steady estimation fitting."""
+    val_fix = setup.val_fix
+    val_fix.pop(extra["rad"], None)
+
+    para_ordered = np.empty(len(setup.para_names))
+    for i, name in enumerate(setup.para_names):
+        para_ordered[i] = para[name]
+    para_kw = setup.get_sim_kwargs(para_ordered)
     val_fix.update(para_kw)
 
     plot_f = ft.partial(setup.func, **val_fix)
-
     radarr = np.linspace(rad.min(), rad.max(), 100)
-    timarr = np.linspace(time.min(), time.max(), 100)
 
-    plt.style.use("default")
+    test_name = list(np.unique(radnames[:, 0]))
+    test_name.sort()
 
-    t_gen = np.ones_like(radarr)
-    r_gen = np.ones_like(time)
-    r_gen1 = np.ones_like(timarr)
-    xydir = np.zeros_like(time)
-
-    fig = plt.figure(figsize=(12, 8))
-    ax = fig.gca(projection=Axes3D.name)
-
-    for ri, re in enumerate(rad):
-        r1 = re * r_gen
-        r11 = re * r_gen1
-
-        h = plot_f(**{extra["time"]: time, extra["rad"]: re}).reshape(-1)
-        h1 = data[:, ri]
-        h2 = plot_f(**{extra["time"]: timarr, extra["rad"]: re}).reshape(-1)
-
-        zord = 1000 * (len(rad) - ri)
+    style = copy.deepcopy(plt.rcParams) if style is None else style
+    keep_fs = False
+    if style == "WTP":
+        style = "ggplot"
+        font_size = plt.rcParams.get("font.size", 10.0)
+        keep_fs = True
+    with plt.style.context(style):
+        if keep_fs:
+            plt.rcParams.update({"font.size": font_size})
+        clrs = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+        clr_n = len(clrs)
+        fig, ax = _get_fig_ax(fig, ax, figsize=(9, 6))
+        if ax_ins:
+            axins = ax.inset_axes([0.4, 0.07, 0.57, 0.5])
+            axins.plot(
+                radarr,
+                plot_f(**{extra["rad"]: radarr}),
+                alpha=0.6,
+                color="k",
+                zorder=200,
+            )
+            axins.set_xscale("log")
+            axins.set_facecolor("w")
+            axins.text(
+                0.975,
+                0.025,
+                "log-radius plot",
+                ha="right",
+                va="bottom",
+                bbox=dict(boxstyle="round", ec="k", fc="w"),
+                transform=axins.transAxes,
+            )
+        for ri, re in enumerate(rad):
+            h = plot_f(**{extra["rad"]: re}).reshape(-1)
+            h1 = data[ri]
+            color = clrs[(test_name.index(radnames[ri, 0]) + 2) % clr_n]
+            if radnames[ri, 0] == radnames[ri, 1]:
+                label = "test at '{}'".format(radnames[ri, 0])
+            else:
+                label = None
+            ax.plot([re, re], [h, h1], alpha=0.6, color=color, zorder=100)
+            ax.scatter(re, data[ri], color=color, label=label, zorder=300)
+            if ax_ins:
+                axins.plot(
+                    [re, re], [h, h1], alpha=0.6, color=color, zorder=100
+                )
+                axins.scatter(re, data[ri], color=color, zorder=300)
 
         ax.plot(
-            r11,
-            timarr,
-            h2,
-            label=radnames[ri] + " r={:04.2f}".format(re),
-            zorder=zord,
+            radarr,
+            plot_f(**{extra["rad"]: radarr}),
+            alpha=0.6,
+            color="k",
+            zorder=200,
+            label="fitted type curve",
         )
-        ax.quiver(
-            r1,
-            time,
-            h,
-            xydir,
-            xydir,
-            h1 - h,
-            alpha=0.5,
-            arrow_length_ratio=0.0,
-            color="C" + str(ri % 10),
-            zorder=zord,
-        )
-        ax.scatter(r1, time, h1, depthshade=False, zorder=zord)
+        ax.set_xlabel(r"$r$ in $\left[\mathrm{m}\right]$")
+        ax.set_ylabel(r"$\tilde{h}$ in $\left[\mathrm{m}\right]$")
+        _sort_lgd(ax, loc="upper left", bbox_to_anchor=(1, 1), markerscale=2)
+        fig.tight_layout()
+        if plotname is not None:
+            fig.savefig(plotname, format="pdf")
 
-    for te in time:
-        t11 = te * t_gen
-        h = plot_f(**{extra["time"]: te, extra["rad"]: radarr}).reshape(-1)
-        ax.plot(radarr, t11, h, color="k", alpha=0.1, linestyle="--")
-
-    ax.view_init(elev=45, azim=155)
-    ax.set_xlabel(r"$r$ in $\left[\mathrm{m}\right]$")
-    ax.set_ylabel(r"$t$ in $\left[\mathrm{s}\right]$")
-    ax.set_zlabel(r"$h/|Q|$ in $\left[\mathrm{m}\right]$")
-    ax.legend(loc="lower left", fontsize="x-small")
-    plt.tight_layout()
-    plt.savefig(plotname, format="pdf")
+    return ax
 
 
-def plotfitting3D(
-    data, para, rad, time, radnames, prate, plotname, rwell=0.0, rinf=np.inf
-):
-    """Plot of estimation fitting."""
-    radarr = np.linspace(rad.min(), rad.max(), 100)
-    timarr = np.linspace(time.min(), time.max(), 100)
-
-    plt.style.use("default")
-
-    t_gen = np.ones_like(radarr)
-    r_gen = np.ones_like(time)
-    r_gen1 = np.ones_like(timarr)
-    xydir = np.zeros_like(time)
-
-    fig = plt.figure(figsize=(12, 8))
-    ax = fig.gca(projection=Axes3D.name)
-
-    for ri, re in enumerate(rad):
-        r1 = re * r_gen
-        r11 = re * r_gen1
-
-        h = ana.ext_theis2D(
-            time=time,
-            rad=re,
-            TG=np.exp(para[0]),
-            sig2=para[1],
-            corr=para[2],
-            S=np.exp(para[3]),
-            Qw=prate,
-            rwell=rwell,
-            rinf=rinf,
-        ).reshape(-1)
-        h1 = data[:, ri]
-        h2 = ana.ext_theis2D(
-            time=timarr,
-            rad=re,
-            TG=np.exp(para[0]),
-            sig2=para[1],
-            corr=para[2],
-            S=np.exp(para[3]),
-            Qw=prate,
-            rwell=rwell,
-            rinf=rinf,
-        ).reshape(-1)
-
-        zord = 1000 * (len(rad) - ri)
-
-        ax.plot(
-            r11,
-            timarr,
-            h2,
-            label=radnames[ri] + " r={:04.2f}".format(re),
-            zorder=zord,
-        )
-        ax.quiver(
-            r1,
-            time,
-            h,
-            xydir,
-            xydir,
-            h1 - h,
-            alpha=0.5,
-            arrow_length_ratio=0.0,
-            color="C" + str(ri % 10),
-            zorder=zord,
-        )
-        ax.scatter(r1, time, h1, depthshade=False, zorder=zord)
-
-    for te in time:
-        t11 = te * t_gen
-        h = ana.ext_theis2D(
-            time=te,
-            rad=radarr,
-            TG=np.exp(para[0]),
-            sig2=para[1],
-            corr=para[2],
-            S=np.exp(para[3]),
-            Qw=prate,
-            rwell=rwell,
-            rinf=rinf,
-        ).reshape(-1)
-        ax.plot(radarr, t11, h, color="k", alpha=0.1, linestyle="--")
-
-    ax.view_init(elev=45, azim=155)
-    ax.set_xlabel(r"$r$ in $\left[\mathrm{m}\right]$")
-    ax.set_ylabel(r"$t$ in $\left[\mathrm{s}\right]$")
-    ax.set_zlabel(r"$h/|Q|$ in $\left[\mathrm{m}\right]$")
-    ax.legend(loc="lower left", fontsize="x-small")
-    plt.tight_layout()
-    plt.savefig(plotname, format="pdf")
-
-
-def plotfitting3Dtheis(data, para, rad, time, radnames, prate, plotname):
-    """Plot of estimation fitting with theis."""
-    radarr = np.linspace(rad.min(), rad.max(), 100)
-    timarr = np.linspace(time.min(), time.max(), 100)
-
-    plt.style.use("default")
-
-    t_gen = np.ones_like(radarr)
-    r_gen = np.ones_like(time)
-    r_gen1 = np.ones_like(timarr)
-    xydir = np.zeros_like(time)
-
-    fig = plt.figure(figsize=(12, 8))
-    ax = fig.gca(projection="3d")
-
-    for ri, re in enumerate(rad):
-        r1 = re * r_gen
-        r11 = re * r_gen1
-
-        h = ana.theis(
-            time=time, rad=re, T=np.exp(para[0]), S=np.exp(para[1]), Qw=prate
-        ).reshape(-1)
-        h1 = data[:, ri]
-        h2 = ana.theis(
-            time=timarr, rad=re, T=np.exp(para[0]), S=np.exp(para[1]), Qw=prate
-        ).reshape(-1)
-
-        zord = 1000 * (len(rad) - ri)
-
-        ax.plot(
-            r11,
-            timarr,
-            h2,
-            label=radnames[ri] + " r={:04.2f}".format(re),
-            zorder=zord,
-        )
-        ax.quiver(
-            r1,
-            time,
-            h,
-            xydir,
-            xydir,
-            h1 - h,
-            alpha=0.5,
-            arrow_length_ratio=0.0,
-            color="C" + str(ri % 10),
-            zorder=zord,
-        )
-        ax.scatter(r1, time, h1, depthshade=False, zorder=zord)
-
-    for te in time:
-        t11 = te * t_gen
-        h = ana.theis(
-            time=te, rad=radarr, T=np.exp(para[0]), S=np.exp(para[1]), Qw=prate
-        ).reshape(-1)
-        ax.plot(radarr, t11, h, color="k", alpha=0.1, linestyle="--")
-
-    ax.view_init(elev=45, azim=155)
-    ax.set_xlabel(r"$r$ in $\left[\mathrm{m}\right]$")
-    ax.set_ylabel(r"$t$ in $\left[\mathrm{s}\right]$")
-    ax.set_zlabel(r"$h/|Q|$ in $\left[\mathrm{m}\right]$")
-    ax.legend(loc="lower left")
-    #    plt.tight_layout()
-    plt.savefig(plotname, format="pdf")
-
-
-def plotparainteract(result, paranames, plotname):
+def plotparainteract(result, paranames, plotname=None, fig=None, style="WTP"):
     """Plot of parameter interaction."""
     import pandas as pd
 
-    fields = [word for word in result.dtype.names if word.startswith("par")]
-    parameterdistribtion = result[fields]
-    df = pd.DataFrame(
-        np.asarray(parameterdistribtion).T.tolist(), columns=paranames
-    )
-    pd.plotting.scatter_matrix(df, alpha=0.2, figsize=(12, 12), diagonal="kde")
-    plt.savefig(plotname, format="pdf")
+    style = copy.deepcopy(plt.rcParams) if style is None else style
+    keep_fs = False
+    if style == "WTP":
+        style = "default"
+        font_size = plt.rcParams.get("font.size", 10.0)
+        # font type fix
+        pdf_ft = plt.rcParams.get("pdf.fonttype", 42)
+        ps_ft = plt.rcParams.get("ps.fonttype", 42)
+        keep_fs = True
+    with plt.style.context(style):
+        if keep_fs:
+            # font type fix (resetted in default)
+            plt.rcParams.update({"pdf.fonttype": pdf_ft, "ps.fonttype": ps_ft})
+            plt.rcParams.update({"font.size": font_size})
+        fig, ax = _get_fig_ax(fig, ax=None, figsize=(12, 12))
+        fields = [par for par in result.dtype.names if par.startswith("par")]
+        parameterdistribtion = result[fields]
+        df = pd.DataFrame(
+            np.asarray(parameterdistribtion).T.tolist(), columns=paranames
+        )
+        with warnings.catch_warnings():
+            # We know that fig is resetted, but we need to give ax to set fig
+            warnings.simplefilter("ignore", UserWarning)
+            if len(paranames) > 1:
+                pd.plotting.scatter_matrix(
+                    df, alpha=0.2, ax=ax, diagonal="kde"
+                )
+            else:
+                df.plot.kde(ax=ax)
+        fig.tight_layout()
+        fig.subplots_adjust(hspace=0, wspace=0, bottom=0.1)
+        if plotname is not None:
+            fig.savefig(plotname, format="pdf")
+    return fig
 
 
 def plotparatrace(
@@ -833,56 +803,95 @@ def plotparatrace(
     parameterlabels=None,
     xticks=None,
     stdvalues=None,
-    filename="test.pdf",
+    plotname=None,
+    fig=None,
+    style="WTP",
 ):
     """Plot of parameter trace."""
     rep = len(result)
     rows = len(parameternames)
-    fig = plt.figure(figsize=(15, 3 * rows))
+    style = copy.deepcopy(plt.rcParams) if style is None else style
+    keep_fs = False
+    if style == "WTP":
+        style = "ggplot"
+        font_size = plt.rcParams.get("font.size", 10.0)
+        keep_fs = True
+    with plt.style.context(style):
+        if keep_fs:
+            plt.rcParams.update({"font.size": font_size})
+        clrs = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+        fig = _get_fig_ax(fig, ax=False, figsize=(15, 3 * rows))
 
-    for j in range(rows):
-        ax = plt.subplot(rows, 1, 1 + j)
-        data = result["par" + parameternames[j]]
+        for j in range(rows):
+            ax = fig.add_subplot(rows, 1, 1 + j)
+            data = result["par" + parameternames[j]]
 
-        ax.plot(data, "-", color="C0")
+            ax.plot(data, "-", color=clrs[0])
 
-        if stdvalues is not None:
-            ax.plot(
-                [stdvalues[j]] * rep,
-                "--",
-                label="best value: {:04.2f}".format(stdvalues[j]),
-                color="C1",
+            if stdvalues is not None:
+                ax.plot(
+                    [stdvalues[parameternames[j]]] * rep,
+                    "--",
+                    label="best value: {:04.2f}".format(
+                        stdvalues[parameternames[j]]
+                    ),
+                    color="k",
+                    alpha=0.7,
+                )
+                ax.legend()
+
+            if xticks is None:
+                xticks = np.linspace(0, 1, 11) * len(data)
+
+            ax.set_xlim(0, rep)
+            ax.set_ylim(
+                np.min(data) - 0.1 * np.max(abs(data)),
+                np.max(data) + 0.1 * np.max(abs(data)),
             )
-            ax.legend()
+            ax.xaxis.set_ticks(xticks)
+            ax.set_ylabel(
+                parameterlabels[j], rotation=0, fontsize="large", labelpad=10
+            )
 
-        if xticks is None:
-            xticks = np.linspace(0, 1, 11) * len(data)
-
-        ax.set_xlim(0, rep)
-        ax.set_ylim(
-            np.min(data) - 0.1 * np.max(abs(data)),
-            np.max(data) + 0.1 * np.max(abs(data)),
-        )
-        ax.xaxis.set_ticks(xticks)
-        ax.set_ylabel(parameterlabels[j], rotation=0, fontsize=16, labelpad=10)
-
-    plt.tight_layout()
-    fig.savefig(filename, format="pdf", bbox_inches="tight")
+        fig.tight_layout()
+        if plotname is not None:
+            fig.savefig(plotname, format="pdf", bbox_inches="tight")
+    return fig
 
 
-def plotsensitivity(paralabels, sensitivities, plotname):
+def plotsensitivity(
+    paralabels, sensitivities, plotname=None, fig=None, ax=None, style="WTP"
+):
     """Plot of sensitivity results."""
-    __, ax = plt.subplots()
-    ax.bar(
-        range(len(paralabels)),
-        sensitivities["ST"],
-        color="C1",
-        alpha=0.8,
-        align="center",
-    )
-    ax.set_ylabel(r"FAST total-sensitivity")
-    ax.set_ylim([-0.1, 1.1])
-    plt.xticks(range(len(paralabels)), paralabels)
-    plt.title("Sensitivity", fontsize=16)
-    plt.savefig(plotname, format="pdf")
+    style = copy.deepcopy(plt.rcParams) if style is None else style
+    keep_fs = False
+    if style == "WTP":
+        style = "ggplot"
+        font_size = plt.rcParams.get("font.size", 10.0)
+        keep_fs = True
+    with plt.style.context(style):
+        if keep_fs:
+            plt.rcParams.update({"font.size": font_size})
+        fig, ax = _get_fig_ax(fig, ax)
+        w_props = {"linewidth": 1, "edgecolor": "w", "width": 0.5}
+        wedges, __ = ax.pie(
+            sensitivities["ST"], wedgeprops=w_props, startangle=90
+        )
+        lgd = ax.legend(
+            wedges,
+            paralabels,
+            title="Parameters",
+            loc="center left",
+            bbox_to_anchor=(1, 0, 0.5, 1),
+        )
+        ax.axis("equal")
+        fig.suptitle("FAST total sensitivity shares", fontsize="large")
+        fig.tight_layout()
+        if plotname is not None:
+            fig.savefig(
+                plotname,
+                format="pdf",
+                bbox_extra_artists=(lgd,),
+                bbox_inches="tight",
+            )
     return ax

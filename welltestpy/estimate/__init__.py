@@ -4,48 +4,65 @@ welltestpy subpackage providing routines to estimate pump test parameters.
 
 .. currentmodule:: welltestpy.estimate
 
-Subpackages
-^^^^^^^^^^^
+Estimators
+^^^^^^^^^^
 
-The following subpackages are provided
-
-.. autosummary::
-    estimatelib
-    spotpy_classes
-
-Estimation classes
-^^^^^^^^^^^^^^^^^^
-
-The following estimation classes are provided
+The following estimators are provided
 
 .. autosummary::
-    TransientPumping
     ExtTheis3D
     ExtTheis2D
     Neuman2004
     Theis
-    TypeCurve
+    ExtThiem3D
+    ExtThiem2D
+    Neuman2004Steady
+    Thiem
+
+
+Base Classes
+^^^^^^^^^^^^
+
+Transient
+~~~~~~~~~
+
+All transient estimators are derived from the following class
+
+.. autosummary::
+   TransientPumping
+
+Steady Pumping
+~~~~~~~~~~~~~~
+
+All steady estimators are derived from the following class
+
+.. autosummary::
+   SteadyPumping
 """
-from __future__ import absolute_import
+from . import estimators, spotpylib, steady_lib, transient_lib
 
-from welltestpy.estimate import estimatelib, spotpy_classes
-
-from welltestpy.estimate.estimatelib import (
-    TransientPumping,
+from .estimators import (
     ExtTheis3D,
     ExtTheis2D,
     Neuman2004,
     Theis,
+    ExtThiem3D,
+    ExtThiem2D,
+    Neuman2004Steady,
+    Thiem,
 )
-from welltestpy.estimate.spotpy_classes import TypeCurve
+from .transient_lib import TransientPumping
+from .steady_lib import SteadyPumping
 
-__all__ = [
-    "TransientPumping",
+__all__ = ["estimators", "spotpylib", "steady_lib", "transient_lib"]
+__all__ += [
     "ExtTheis3D",
     "ExtTheis2D",
     "Neuman2004",
     "Theis",
-    "TypeCurve",
-    "estimatelib",
-    "spotpy_classes",
+    "ExtThiem3D",
+    "ExtThiem2D",
+    "Neuman2004Steady",
+    "Thiem",
 ]
+__all__ += ["TransientPumping", "SteadyPumping"]

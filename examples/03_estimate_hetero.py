@@ -1,15 +1,15 @@
-# -*- coding: utf-8 -*-
+"""
+Estimate heterogeneous parameters
+---------------------------------
+
+Here we demonstrate how to estimate parameters of heterogeneity, namely
+mean, variance and correlation length of log-transmissivity, as well as the
+storage with the aid the the extended Theis solution in 2D.
+"""
+
 import welltestpy as wtp
 
-campaign = wtp.data.load_campaign("Cmp_UFZ-campaign.cmp")
-estimation = wtp.estimate.Stat2Dest("Estimate_theis", campaign)
-estimation.setpumprate()
-estimation.settime()
-estimation.genrtdata()
-estimation.run(
-    dbname="database_het",
-    plotname1="paratrace_het.pdf",
-    plotname2="fit_plot_het.pdf",
-    plotname3="parainteract_het.pdf",
-    estname="estimation_het.txt",
-)
+campaign = wtp.load_campaign("Cmp_UFZ-campaign.cmp")
+estimation = wtp.estimate.ExtTheis2D("Estimate_het2D", campaign, generate=True)
+estimation.run()
+estimation.sensitivity()
